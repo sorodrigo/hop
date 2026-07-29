@@ -34,16 +34,22 @@ func New(addr string) Host {
 	return Host{Addr: addr, TmuxPath: "tmux", LoginShell: true}
 }
 
+// tmux -u forces UTF-8 output. It is not optional here: the remote command
+// runs under `sh -lc`, a non-interactive login shell that never sources the
+// zsh config where LANG and LC_ALL are exported. tmux then sees no UTF-8
+// locale, marks the client non-UTF-8, and rewrites every non-ASCII character
+// it draws as "_" -- which turns any TUI on the far side into line noise.
+
 // ListArgs returns the argv for listing sessions on the host.
 func (h Host) ListArgs() []string {
-	command := h.remoteCommand([]string{h.tmux(), "list-sessions", "-F", tmux.ListFormat}, false)
+	command := h.remoteCommand([]string{h.tmux(), "-u", "list-sessions", "-F", tmux.ListFormat}, false)
 	return append(h.ssh(false), command)
 }
 
 // AttachArgs returns the argv for creating-or-attaching the named session.
 // -A is what lets a single command both start a session and resume it.
 func (h Host) AttachArgs(session string) []string {
-	command := h.remoteCommand([]string{h.tmux(), "new-session", "-A", "-s", session}, true)
+	command := h.remoteCommand([]string{h.tmux(), "-u", "new-session", "-A", "-s", session}, true)
 	return append(h.ssh(true), command)
 }
 

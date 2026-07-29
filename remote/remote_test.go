@@ -100,7 +100,7 @@ func TestRemoteCommandSurvivesShellParsing(t *testing.T) {
 			runInShell(t, last(host.AttachArgs(session)))
 
 			got := readArgv(t, argvFile)
-			want := []string{"new-session", "-A", "-s", session}
+			want := []string{"-u", "new-session", "-A", "-s", session}
 			if !equal(got, want) {
 				t.Errorf("tmux received %q, want %q", got, want)
 			}
@@ -115,7 +115,7 @@ func TestListCommandSurvivesShellParsing(t *testing.T) {
 	runInShell(t, last(host.ListArgs()))
 
 	got := readArgv(t, argvFile)
-	want := []string{"list-sessions", "-F", tmux.ListFormat}
+	want := []string{"-u", "list-sessions", "-F", tmux.ListFormat}
 	if !equal(got, want) {
 		t.Errorf("tmux received %q, want %q", got, want)
 	}
