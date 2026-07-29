@@ -25,6 +25,78 @@ func TestNewUsesWorkableDefaults(t *testing.T) {
 	}
 }
 
+func TestAttachFixesTheTmuxDefaults(t *testing.T) {
+	stub, argvFile, _ := stubTmux(t)
+	host := remote.Host{Addr: "mac-mini.local", TmuxPath: stub}
+
+	runInShell(t, last(host.AttachArgs("quiet-otter")))
+	got := readArgv(t, argvFile)
+
+	wantTail := []string{
+		";", "set", "-t", "quiet-otter", "status", "off",
+		";", "set", "-t", "quiet-otter", "mouse", "on",
+		";", "set", "-t", "quiet-otter", "set-titles", "on",
+		";", "set", "-t", "quiet-otter", "set-titles-string", "#T",
+		";", "set", "-s", "set-clipboard", "on",
+		";", "set", "-s", "focus-events", "on",
+		";", "set", "-w", "-t", "quiet-otter", "allow-passthrough", "on",
+	}
+	if len(got) < len(wantTail) || !equal(got[len(got)-len(wantTail):], wantTail) {
+		t.Errorf("tmux received %q,\nwant it to end with %q", got, wantTail)
+	}
+	// Anything that can be scoped is, so sessions started by hand keep theirs.
+	if contains(got, "-g") {
+		t.Errorf("tmux received %q, which would set session options globally", got)
+	}
+}
+
+// allow-passthrough is the newest option here and the only one a tmux in the
+// wild might reject, so it goes last: tmux abandons the rest of a command list
+// when one command fails, and everything above it is worth more.
+func TestNewestOptionIsSetLast(t *testing.T) {
+	stub, argvFile, _ := stubTmux(t)
+	host := remote.Host{Addr: "mac-mini.local", TmuxPath: stub}
+
+	runInShell(t, last(host.AttachArgs("quiet-otter")))
+	got := readArgv(t, argvFile)
+
+	if got[len(got)-2] != "allow-passthrough" {
+		t.Errorf("tmux received %q, want allow-passthrough set last", got)
+	}
+}
+
+func TestAttachForwardsTrueColor(t *testing.T) {
+	stub, _, colorFile := stubTmux(t)
+	host := remote.Host{Addr: "mac-mini.local", TmuxPath: stub, ColorTerm: "truecolor"}
+
+	runInShell(t, last(host.AttachArgs("quiet-otter")))
+
+	// tmux reads COLORTERM from its own environment to decide whether the
+	// client can do 24-bit colour, and ssh does not forward it.
+	if got := readFile(t, colorFile); got != "truecolor" {
+		t.Errorf("tmux saw COLORTERM=%q, want %q", got, "truecolor")
+	}
+}
+
+func TestAttachClaimsNoColorTheTerminalDidNot(t *testing.T) {
+	stub, _, colorFile := stubTmux(t)
+	host := remote.Host{Addr: "mac-mini.local", TmuxPath: stub}
+
+	runInShell(t, last(host.AttachArgs("quiet-otter")))
+
+	if got := readFile(t, colorFile); got != unsetColorTerm {
+		t.Errorf("tmux saw COLORTERM=%q, want it left unset", got)
+	}
+}
+
+func TestNewForwardsTheLocalColorTerm(t *testing.T) {
+	t.Setenv("COLORTERM", "24bit")
+
+	if got := remote.New("mac-mini.local").ColorTerm; got != "24bit" {
+		t.Errorf("ColorTerm = %q, want the local terminal's %q", got, "24bit")
+	}
+}
+
 func TestListArgsTargetsTheHost(t *testing.T) {
 	args := remote.New("mac-mini.local").ListArgs()
 
@@ -94,13 +166,25 @@ func TestRemoteCommandSurvivesShellParsing(t *testing.T) {
 
 	for label, session := range names {
 		t.Run(label, func(t *testing.T) {
-			stub, argvFile := stubTmux(t)
-			host := remote.Host{Addr: "irrelevant", TmuxPath: stub}
+			stub, argvFile, _ := stubTmux(t)
+			host := remote.New("irrelevant")
+			host.TmuxPath = stub
 
 			runInShell(t, last(host.AttachArgs(session)))
 
 			got := readArgv(t, argvFile)
-			want := []string{"-u", "new-session", "-A", "-s", session}
+			// The name reaches tmux five times, and ";" has to arrive as an
+			// argument rather than being eaten by the shell.
+			want := []string{
+				"-u", "new-session", "-A", "-s", session,
+				";", "set", "-t", session, "status", "off",
+				";", "set", "-t", session, "mouse", "on",
+				";", "set", "-t", session, "set-titles", "on",
+				";", "set", "-t", session, "set-titles-string", "#T",
+				";", "set", "-s", "set-clipboard", "on",
+				";", "set", "-s", "focus-events", "on",
+				";", "set", "-w", "-t", session, "allow-passthrough", "on",
+			}
 			if !equal(got, want) {
 				t.Errorf("tmux received %q, want %q", got, want)
 			}
@@ -109,10 +193,15 @@ func TestRemoteCommandSurvivesShellParsing(t *testing.T) {
 }
 
 func TestListCommandSurvivesShellParsing(t *testing.T) {
-	stub, argvFile := stubTmux(t)
-	host := remote.Host{Addr: "irrelevant", TmuxPath: stub}
+	stub, argvFile, colorFile := stubTmux(t)
+	host := remote.Host{Addr: "irrelevant", TmuxPath: stub, ColorTerm: "truecolor"}
 
 	runInShell(t, last(host.ListArgs()))
+
+	// Listing draws nothing, so it has no use for a colour hint.
+	if got := readFile(t, colorFile); got != unsetColorTerm {
+		t.Errorf("list command set COLORTERM=%q, want it left unset", got)
+	}
 
 	got := readArgv(t, argvFile)
 	want := []string{"-u", "list-sessions", "-F", tmux.ListFormat}
@@ -121,28 +210,48 @@ func TestListCommandSurvivesShellParsing(t *testing.T) {
 	}
 }
 
-// stubTmux writes an executable that records its argv, one entry per line,
-// and returns the stub path plus the file it records into.
-func stubTmux(t *testing.T) (stub, argvFile string) {
+// stubTmux writes an executable that records its argv, one entry per line, and
+// the COLORTERM it was handed. It returns the stub path plus the two files.
+func stubTmux(t *testing.T) (stub, argvFile, colorFile string) {
 	t.Helper()
 	dir := t.TempDir()
 	stub = filepath.Join(dir, "tmux")
 	argvFile = filepath.Join(dir, "argv")
+	colorFile = filepath.Join(dir, "colorterm")
 
-	script := "#!/bin/sh\n: > " + argvFile + "\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argvFile + "; done\n"
+	script := "#!/bin/sh\n" +
+		"printf '%s' \"${COLORTERM-" + unsetColorTerm + "}\" > " + colorFile + "\n" +
+		": > " + argvFile + "\n" +
+		"for a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argvFile + "; done\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing stub tmux: %v", err)
 	}
-	return stub, argvFile
+	return stub, argvFile, colorFile
 }
+
+const unsetColorTerm = "<unset>"
 
 func runInShell(t *testing.T, remoteCommand string) {
 	t.Helper()
 	// sshd runs the command with `$SHELL -c <string>`; /bin/sh matches its parsing.
-	out, err := exec.Command("/bin/sh", "-c", remoteCommand).CombinedOutput()
+	cmd := exec.Command("/bin/sh", "-c", remoteCommand)
+	// A bare PATH, so the COLORTERM of whoever runs the tests cannot leak in
+	// and make a test pass on its own.
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("remote command %q failed: %v\n%s", remoteCommand, err, out)
 	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("stub tmux recorded nothing: %v", err)
+	}
+	return string(data)
 }
 
 func readArgv(t *testing.T, path string) []string {

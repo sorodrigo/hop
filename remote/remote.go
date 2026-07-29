@@ -27,11 +27,23 @@ type Host struct {
 	// what an interactive session would see. Without it, `ssh host cmd` runs
 	// with a bare PATH that typically excludes Homebrew.
 	LoginShell bool
+
+	// ColorTerm is exported as COLORTERM on the far side, where tmux reads it
+	// to decide whether the client can do 24-bit colour. ssh forwards LANG and
+	// LC_* but not this, so without it tmux quantises every truecolor escape
+	// an application inside emits down to 256. Empty forwards nothing, which
+	// is right for a terminal that never claimed truecolor in the first place.
+	ColorTerm string
 }
 
 // New returns a Host with defaults that work for a stock remote machine.
 func New(addr string) Host {
-	return Host{Addr: addr, TmuxPath: "tmux", LoginShell: true}
+	return Host{
+		Addr:       addr,
+		TmuxPath:   "tmux",
+		LoginShell: true,
+		ColorTerm:  os.Getenv("COLORTERM"),
+	}
 }
 
 // tmux -u forces UTF-8 output. It is not optional here: the remote command
@@ -42,15 +54,68 @@ func New(addr string) Host {
 
 // ListArgs returns the argv for listing sessions on the host.
 func (h Host) ListArgs() []string {
-	command := h.remoteCommand([]string{h.tmux(), "-u", "list-sessions", "-F", tmux.ListFormat}, false)
+	command := h.remoteCommand([]string{h.tmux(), "-u", "list-sessions", "-F", tmux.ListFormat}, false, "")
 	return append(h.ssh(false), command)
 }
 
 // AttachArgs returns the argv for creating-or-attaching the named session.
 // -A is what lets a single command both start a session and resume it.
+//
+// The `set` commands that follow undo tmux defaults that otherwise announce,
+// constantly, that you are not in a plain shell:
+//
+//	status off           the green bar across the bottom row
+//	mouse on             a scroll wheel that reaches nothing, because tmux
+//	                     draws in the alternate screen and freezes the
+//	                     terminal's own scrollback
+//	set-titles           tmux swallows the title escapes the remote shell
+//	                     sends, so the terminal tab goes stale
+//	set-clipboard on     the default, external, sets the clipboard outward but
+//	                     refuses OSC 52 from applications inside, so a yank in
+//	                     the far side's editor never reaches your machine
+//	focus-events on      vim's autoread and anything else watching for focus
+//	allow-passthrough    inline images and shell-integration marks
+//
+// Session options take -t so hop never rewrites sessions it did not open.
+// The other two have no per-session scope; they are set anyway because each
+// grants a capability rather than changing how anything looks, so a session
+// someone else started can only gain from them.
 func (h Host) AttachArgs(session string) []string {
-	command := h.remoteCommand([]string{h.tmux(), "-u", "new-session", "-A", "-s", session}, true)
-	return append(h.ssh(true), command)
+	argv := []string{h.tmux(), "-u", "new-session", "-A", "-s", session}
+
+	for _, option := range [][2]string{
+		{"status", "off"},
+		{"mouse", "on"},
+		{"set-titles", "on"},
+		// tmux's own default here reads "#S:#I:#W - "#T"", which no local
+		// shell would ever put in a title bar. #T alone is what the remote
+		// shell set, which is what plain ssh would have shown.
+		{"set-titles-string", "#T"},
+	} {
+		argv = append(argv, ";", "set", "-t", session, option[0], option[1])
+	}
+
+	argv = append(argv,
+		";", "set", "-s", "set-clipboard", "on",
+		";", "set", "-s", "focus-events", "on",
+	)
+
+	// Last on purpose: allow-passthrough is the newest option here, and tmux
+	// abandons the rest of a command list when one command fails. Everything
+	// above it is worth more than it is.
+	argv = append(argv, ";", "set", "-w", "-t", session, "allow-passthrough", "on")
+
+	return append(h.ssh(true), h.remoteCommand(argv, true, h.colorEnv()))
+}
+
+// colorEnv renders the COLORTERM assignment that precedes tmux on the remote
+// side, or "" when there is nothing to claim. It is deliberately not quoted as
+// a whole: a quoted word is a command name to the shell, not an assignment.
+func (h Host) colorEnv() string {
+	if h.ColorTerm == "" {
+		return ""
+	}
+	return "COLORTERM=" + shellQuote(h.ColorTerm) + " "
 }
 
 // List returns the sessions currently on the host. A host whose tmux server
@@ -108,7 +173,8 @@ func (h Host) ssh(tty bool) []string {
 
 // remoteCommand renders argv into the single string sshd hands to the remote
 // shell, quoting every word so session names may contain spaces or quotes.
-func (h Host) remoteCommand(argv []string, replaceShell bool) string {
+// env is prepended verbatim, already quoted by its caller.
+func (h Host) remoteCommand(argv []string, replaceShell bool, env string) string {
 	quoted := make([]string, len(argv))
 	for i, arg := range argv {
 		quoted[i] = shellQuote(arg)
@@ -119,6 +185,8 @@ func (h Host) remoteCommand(argv []string, replaceShell bool) string {
 		// Drop the intermediate shell so tmux owns the TTY directly.
 		command = "exec " + command
 	}
+	// Assignments come first, and survive the exec into tmux's environment.
+	command = env + command
 	if h.LoginShell {
 		command = "sh -lc " + shellQuote(command)
 	}
