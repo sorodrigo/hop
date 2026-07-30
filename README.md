@@ -149,6 +149,109 @@ the right and treats everything before them as the name.
 This same bug breaks [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect),
 whose delimiter is `$'\t'` — on tmux 3.6+ it writes empty snapshots.
 
+## Troubleshooting
+
+Two things go wrong often enough to name, and neither is hop's doing. Both are
+worth reproducing *outside* tmux before you go looking in here.
+
+### A tool from your shell config is missing
+
+`node`, `rbenv`, `pyenv` and friends come from your rc files, and the first
+suspicion is always that tmux ran the wrong kind of shell. It did not. hop
+leaves `default-command` unset, so tmux starts each pane as a **login,
+interactive** shell — `~/.zprofile` and `~/.zshrc` both run. From inside a pane:
+
+```
+$ print -r -- "login=$options[login] interactive=$options[interactive] argv0=$0"
+login=on interactive=on argv0=-zsh
+```
+
+So a missing tool is a shell-config problem, and it reproduces with no tmux in
+sight:
+
+```sh
+ssh HOST 'zsh -ic "command -v node"'
+```
+
+One trap is worth spelling out, because it fails silently. nvm strips comments
+from its alias files with `${line%%#*}`, and under zsh's `EXTENDED_GLOB` a
+leading `#` is a glob operator, so every alias lookup dies:
+
+```
+nvm_alias:32: bad pattern: #*
+```
+
+That includes the lookup `nvm.sh` runs as it loads to apply the `default` alias,
+so the shell comes up with `nvm` defined but no `node` on `$PATH`. `nvm use 24`
+looks like a fix only because naming a version outright needs no alias. nvm
+reads shell options when its functions *run*, not when they are defined, so the
+load and every later call both have to be covered:
+
+```zsh
+export NVM_DIR="$HOME/.nvm"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+	unsetopt EXTENDED_GLOB
+	\. "$NVM_DIR/nvm.sh"
+	setopt EXTENDED_GLOB
+
+	functions[_nvm_real]=$functions[nvm]   # copy first, or it calls itself
+	nvm() {
+		setopt LOCAL_OPTIONS NO_EXTENDED_GLOB
+		_nvm_real "$@"
+	}
+fi
+```
+
+### `User interaction is not allowed`
+
+Anything reaching the macOS login keychain — `security`, git credential helpers,
+signing tools — fails this way in a hop session. ssh logins run in launchd's
+`Background` session, which has no GUI, so a **locked** keychain has no way to
+ask for the password and the call fails rather than prompting:
+
+```
+$ launchctl managername
+Background
+```
+
+hop cannot fix this from your end: joining the GUI session needs root
+(`launchctl asuser UID` → `Operation not permitted`), and Apple ships no
+`pam_keychain` to unlock at ssh login. On a FileVault machine the boot-time
+unlock is the only thing that unlocks the keychain, so a restart that unlocks
+the disk without a typed password — `fdesetup authrestart`, an unattended
+software-update restart — leaves it locked for the rest of the session.
+
+Unlock state is global and lasts until reboot, so this is once per boot, not
+once per session. A guarded unlock in `~/.zprofile` keeps it to one prompt. The
+guard is the point: panes are login shells, so an unguarded `unlock-keychain`
+would block every new pane on a password prompt, and pane stdin is a tty, so it
+prompts rather than failing.
+
+```zsh
+if [[ -o interactive ]] &&
+	! security show-keychain-info "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1
+then
+	security unlock-keychain "$HOME/Library/Keychains/login.keychain-db"
+fi
+```
+
+To avoid typing anything at all, the password has to come from a machine whose
+keychain *is* unlocked — your laptop. `security unlock-keychain` reads it from
+stdin when stdin is not a tty, which keeps it out of `argv`, and it has to be a
+separate connection because hop attaches over `ssh -t`:
+
+```sh
+security find-generic-password -w -s hop-keychain |
+	ssh HOST 'security unlock-keychain ~/Library/Keychains/login.keychain-db'
+```
+
+**`reattach-to-user-namespace` is not the fix**, though it is what searching
+turns up. It repairs the *bootstrap* namespace, and the usual advice to set it
+as `default-command` also overrides the login shell described above. Since
+macOS 10.10 `pam_launchd.so` has put ssh sessions in your launchd domain
+already: `pbcopy`, `pbpaste` and the `security` CLI all work inside a hop pane.
+What fails is the *security* session, which the shim does not touch.
+
 ## Layout
 
 ```
