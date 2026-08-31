@@ -70,6 +70,8 @@ func (h Host) ListArgs() []string {
 //	                     terminal's own scrollback
 //	set-titles           tmux swallows the title escapes the remote shell
 //	                     sends, so the terminal tab goes stale
+//	-T clipboard         tells this client that its terminal accepts OSC 52,
+//	                     even when its TERM name is not one tmux recognises
 //	set-clipboard on     the default, external, sets the clipboard outward but
 //	                     refuses OSC 52 from applications inside, so a yank in
 //	                     the far side's editor never reaches your machine
@@ -81,7 +83,7 @@ func (h Host) ListArgs() []string {
 // grants a capability rather than changing how anything looks, so a session
 // someone else started can only gain from them.
 func (h Host) AttachArgs(session string) []string {
-	argv := []string{h.tmux(), "-u", "new-session", "-A", "-s", session}
+	argv := []string{h.tmux(), "-u", "-T", "clipboard", "new-session", "-A", "-s", session}
 
 	for _, option := range [][2]string{
 		{"status", "off"},

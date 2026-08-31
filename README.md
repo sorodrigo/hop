@@ -82,6 +82,7 @@ work against that, so attaching sends a command list rather than a bare
 | `status on` | → `off` | a green bar across the bottom row, on a session that is one window |
 | `mouse off` | → `on` | the scroll wheel reaches nothing at all |
 | `set-titles off` | → `on` | the terminal tab title goes stale |
+| clipboard feature inferred from `TERM` | → forced on | tmux may not know that the local terminal accepts OSC 52 |
 | `set-clipboard external` | → `on` | a yank on the far side never reaches your clipboard |
 | `focus-events off` | → `on` | vim's `autoread` never fires |
 | `allow-passthrough off` | → `on` | no inline images, no shell-integration marks |
@@ -97,6 +98,10 @@ Terminal.app) or Shift (most others) to select natively.
 **The clipboard.** `external`, the default, means tmux sets the system clipboard
 outward but refuses OSC 52 *from applications inside it* — which is the
 direction that matters when you yank in an editor three machines away.
+hop also marks the attached client with tmux's `clipboard` terminal feature.
+This makes copy-mode and mouse copies use OSC 52 even when tmux does not know
+the terminal name. The escape reaches the terminal through ssh, so no clipboard
+tool or plugin is needed on the remote machine.
 
 Session options use `-t` rather than `-g`, so sessions you started by hand keep
 their own. `set-clipboard` and `focus-events` have no per-session scope and are

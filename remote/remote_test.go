@@ -48,6 +48,9 @@ func TestAttachFixesTheTmuxDefaults(t *testing.T) {
 	if contains(got, "-g") {
 		t.Errorf("tmux received %q, which would set session options globally", got)
 	}
+	if !containsSequence(got, "-T", "clipboard") {
+		t.Errorf("tmux received %q, want the client marked as supporting OSC 52", got)
+	}
 }
 
 // allow-passthrough is the newest option here and the only one a tmux in the
@@ -176,7 +179,7 @@ func TestRemoteCommandSurvivesShellParsing(t *testing.T) {
 			// The name reaches tmux five times, and ";" has to arrive as an
 			// argument rather than being eaten by the shell.
 			want := []string{
-				"-u", "new-session", "-A", "-s", session,
+				"-u", "-T", "clipboard", "new-session", "-A", "-s", session,
 				";", "set", "-t", session, "status", "off",
 				";", "set", "-t", session, "mouse", "on",
 				";", "set", "-t", session, "set-titles", "on",
@@ -266,6 +269,15 @@ func readArgv(t *testing.T, path string) []string {
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSequence(haystack []string, first, second string) bool {
+	for i := 0; i+1 < len(haystack); i++ {
+		if haystack[i] == first && haystack[i+1] == second {
 			return true
 		}
 	}
